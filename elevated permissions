@@ -1,0 +1,77 @@
+# Import the Active Directory module
+Import-Module ActiveDirectory
+
+# Define the output folder and ensure it exists
+$outputFolder = "C:\SecReport"
+if (-not (Test-Path -Path $outputFolder)) {
+    New-Item -ItemType Directory -Path $outputFolder
+}
+
+# Get the MachineName and FQDN
+$fqdn = ([System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName)
+
+# Define the output file name
+$outputFile = "$outputFolder\$fqdn.csv"
+
+# Create the file for verification purposes (optional for debugging)
+New-Item -Path $outputFile -ItemType File -Force
+
+# Function to get all users with elevated permissions
+function Get-ElevatedUsers {
+    Write-Output "Listing users with elevated permissions..."
+
+    # Prepare an array to store results
+    $results = @()
+
+    # Get all groups that typically grant elevated permissions
+    $adminGroups = @(
+        "Domain Admins",
+        "Enterprise Admins",
+        "Schema Admins",
+        "Administrators",
+        "Account Operators",
+        "Backup Operators",
+        "Server Operators",
+        "Print Operators",
+        "Group Policy Creator Owners"
+    )
+
+    # List all elevated users
+    foreach ($group in $adminGroups) {
+        $groupDN = Get-ADGroup -Filter "Name -eq '$group'" -ErrorAction SilentlyContinue
+        if ($groupDN) {
+            Write-Output "`nGroup: $group"
+            Get-ADGroupMember -Identity $groupDN.DistinguishedName -Recursive | Where-Object { $_.objectClass -eq "user" } | ForEach-Object {
+                $user = Get-ADUser -Identity $_.SamAccountName -Properties Enabled
+                $results += [PSCustomObject]@{
+                    Group             = $group
+                    Name              = $user.Name
+                    SamAccountName    = $user.SamAccountName
+                    DistinguishedName = $user.DistinguishedName
+                    Enabled           = $user.Enabled
+                }
+            }
+        } else {
+            Write-Output "`nGroup '$group' not found in this domain."
+        }
+    }
+
+    # Check for users with elevated admin roles directly assigned
+    Write-Output "`nChecking for users with the 'AdminCount' attribute set to 1..."
+    $results += Get-ADUser -Filter { AdminCount -eq 1 } -Properties AdminCount, Enabled | Select-Object @{Name='Group';Expression={'AdminCount = 1'}}, Name, SamAccountName, DistinguishedName, Enabled
+
+    # Check for users with passwords that never expire (potential risk)
+    Write-Output "`nListing users with 'PasswordNeverExpires' enabled..."
+    $results += Get-ADUser -Filter { PasswordNeverExpires -eq $true } -Properties PasswordNeverExpires, Enabled | Select-Object @{Name='Group';Expression={'PasswordNeverExpires = True'}}, Name, SamAccountName, DistinguishedName, Enabled
+
+    # Export the results to a CSV file with UTF-8 encoding
+    $results | Export-Csv -Path $outputFile -NoTypeInformation -Encoding UTF8
+
+    Write-Output "`nScript execution complete. Results exported to: $outputFile"
+}
+
+# Execute the function
+Get-ElevatedUsers
+
+# Open the output folder 
+Start-Process -FilePath $outputFolder
